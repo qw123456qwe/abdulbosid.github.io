@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PRO Web DAW – Phonk / Funk</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body{margin:0;background:#000;color:#0f0;font-family:monospace}
+#top{position:sticky;top:0;background:#000;padding:8px;z-index:10}
+button,input,select{margin:4px;background:#111;color:#0f0;border:1px solid #0f0}
+#gridWrap{overflow-x:auto;position:relative}
+#grid{padding:10px}
+.row{display:flex}
+.cell{width:26px;height:26px;border:1px solid #033;background:#111;flex-shrink:0}
+.cell.active{background:#0f0}
+#playhead{position:absolute;top:0;bottom:0;width:2px;background:#0f0;pointer-events:none}
+canvas{width:100%;height:80px;background:#111}
+</style>
+</head>
+<body>
+
+<div id="top">
+Preset:
+<select id="preset">
+<option value="phonk">Phonk</option>
+<option value="montagem">Montagem</option>
+<option value="funk">Funk</option>
+</select>
+BPM <input id="bpm" type="number" value="130" style="width:60px">
+Speed <input id="speed" type="range" min="0.5" max="2" step="0.01" value="1">
+<button onclick="addStep()">+STEP</button>
+<button onclick="play()">PLAY</button>
+<button onclick="stop()">STOP</button>
+<button onclick="exportWav()">EXPORT WAV</button>
+<br>
+<button onclick="micOn()">Mic ON</button>
+<button onclick="recVoice()">REC VOICE</button>
+<button onclick="stopVoice()">STOP VOICE</button>
+<button onclick="saveProject()">SAVE</button>
+<input type="file" id="loadFile">
+</div>
+
+<canvas id="vis"></canvas>
+
+<div id="gridWrap">
+<div id="playhead"></div>
+<div id="grid"></div>
+</div>
+
+<script>
+/* ================== AUDIO CORE ================== */
+const ctx=new (window.AudioContext||webkitAudioContext)();
+const master=ctx.createGain(); master.gain.value=0.9; master.connect(ctx.destination);
+const synthBus=ctx.createGain(); const voiceBus=ctx.createGain();
+synthBus.connect(master); voiceBus.connect(master);
+
+/* ================== DATA ================== */
+const notes=[130.81,146.83,164.81,174.61,196,220,246.94];
+let steps=16,grid=[],voiceGrid=[];
+let currentStep=0,nextTime=0,raf;
+let voiceBuffer=null,mediaRecorder,chunks=[];
+let zoom=1;
+
+/* ================== PRESETS ================== */
+const presets={
+phonk:{bpm:130,speed:1,scale:[0,3,7],wave:"sawtooth",pitch:0.85},
+montagem:{bpm:150,speed:1.1,scale:[0,3,7],wave:"square",pitch:1.1},
+funk:{bpm:110,speed:1,scale:[0,4,7],wave:"triangle",pitch:1}
+};
+let currentScale=presets.phonk.scale,voicePitch=0.85;
+
+/* ================== GRID ================== */
+const gridDiv=document.getElementById("grid");
+function buildGrid(){
+gridDiv.innerHTML=""; grid=[]; voiceGrid=[];
+for(let r=0;r<notes.length;r++){
+ const row=document.createElement("div"); row.className="row";
+ grid[r]=[]; voiceGrid[r]=[];
+ for(let c=0;c<steps;c++){
+  grid[r][c]=false; voiceGrid[r][c]=false;
+  const cell=document.createElement("div"); cell.className="cell";
+  cell.onclick=()=>{grid[r][c]=!grid[r][c];cell.classList.toggle("active")};
+  row.appendChild(cell);
+ }
+ gridDiv.appendChild(row);
+}}
+buildGrid();
+
+function addStep(){
+const old=steps; steps+=4;
+document.querySelectorAll(".row").forEach((row,r)=>{
+ for(let c=old;c<steps;c++){
+  grid[r].push(false); voiceGrid[r].push(false);
+  const cell=document.createElement("div"); cell.className="cell";
+  cell.onclick=()=>{grid[r][c]=!grid[r][c];cell.classList.toggle("active")};
+  row.appendChild(cell);
+ }
+});
+}
+
+/* ================== SYNTH ================== */
+function playNote(freq,time){
+const osc=ctx.createOscillator(),g=ctx.createGain();
+osc.type=document.getElementById("preset").value==="funk"?"triangle":"sawtooth";
+osc.frequency.setValueAtTime(freq,time);
+g.gain.setValueAtTime(0,time);
+g.gain.linearRampToValueAtTime(0.9,time+0.02);
+g.gain.exponentialRampToValueAtTime(0.001,time+0.35);
+osc.connect(g); g.connect(synthBus);
+osc.start(time); osc.stop(time+0.4);
+}
+
+/* ================== MIC + VIS ================== */
+const analyser=ctx.createAnalyser(); analyser.fftSize=2048;
+const canvas=document.getElementById("vis"),cctx=canvas.getContext("2d");
+const data=new Uint8Array(analyser.fftSize);
+
+function micOn(){
+navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{
+ const src=ctx.createMediaStreamSource(stream);
+ src.connect(analyser);
+ mediaRecorder=new MediaRecorder(stream);
+ mediaRecorder.ondataavailable=e=>chunks.push(e.data);
+ mediaRecorder.onstop=()=>{
+  const blob=new Blob(chunks);
+  chunks=[];
+  const r=new FileReader();
+  r.onload=()=>ctx.decodeAudioData(r.result,b=>voiceBuffer=b);
+  r.readAsArrayBuffer(blob);
+ };
+ drawVis();
+});
+}
+
+function drawVis(){
+requestAnimationFrame(drawVis);
+analyser.getByteTimeDomainData(data);
+cctx.fillStyle="#111";cctx.fillRect(0,0,canvas.width,canvas.height);
+cctx.strokeStyle="#0f0";cctx.beginPath();
+let x=0,sw=canvas.width/data.length;
+for(let i=0;i<data.length;i++){
+ let y=(data[i]/128)*canvas.height/2;
+ if(i===0)cctx.moveTo(x,y); else cctx.lineTo(x,y);
+ x+=sw;
+}
+cctx.stroke();
+}
+
+function recVoice(){ if(mediaRecorder){mediaRecorder.start();} }
+function stopVoice(){ if(mediaRecorder&&mediaRecorder.state==="recording")mediaRecorder.stop(); }
+
+/* ================== SCHEDULER ================== */
+function scheduler(){
+while(nextTime<ctx.currentTime+0.1){
+ for(let r=0;r<notes.length;r++){
+  if(grid[r][currentStep]){
+   currentScale.forEach(i=>{
+    playNote(notes[r]*Math.pow(2,i/12),nextTime);
+   });
+  }
+  if(voiceGrid[r][currentStep]&&voiceBuffer){
+   const v=ctx.createBufferSource();
+   v.buffer=voiceBuffer;
+   v.playbackRate.value=voicePitch;
+   v.connect(voiceBus);
+   v.start(nextTime);
+  }
+ }
+ nextTime+=0.25*(60/bpm.value)/speed.value;
+ currentStep=(currentStep+1)%steps;
+ updatePlayhead();
+}
+raf=requestAnimationFrame(scheduler);
+}
+
+function play(){ctx.resume();currentStep=0;nextTime=ctx.currentTime;scheduler();}
+function stop(){cancelAnimationFrame(raf);}
+
+/* ================== PLAYHEAD + UX ================== */
+const playhead=document.getElementById("playhead");
+function updatePlayhead(){
+ playhead.style.left=(currentStep*26*zoom-gridDiv.scrollLeft)+"px";
+}
+
+/* ================== SAVE / LOAD ================== */
+function saveProject(){
+const p={steps,grid,voiceGrid,bpm:bpm.value,speed:speed.value,preset:preset.value};
+const a=document.createElement("a");
+a.href=URL.createObjectURL(new Blob([JSON.stringify(p)]));
+a.download="project.json"; a.click();
+}
+
+loadFile.onchange=e=>{
+const r=new FileReader();
+r.onload=()=>{
+ const p=JSON.parse(r.result);
+ steps=p.steps; grid=p.grid; voiceGrid=p.voiceGrid;
+ bpm.value=p.bpm; speed.value=p.speed;
+ buildGrid();
+};
+r.readAsText(e.target.files[0]);
+};
+
+/* ================== EXPORT WAV ================== */
+function exportWav(){
+const dur=steps*0.25*(60/bpm.value)/speed.value;
+const octx=new OfflineAudioContext(1,44100*dur,44100);
+let t=0;
+for(let s=0;s<steps;s++){
+ for(let r=0;r<notes.length;r++){
+  if(grid[r][s]){
+   currentScale.forEach(i=>{
+    const o=octx.createOscillator(),g=octx.createGain();
+    o.frequency.value=notes[r]*Math.pow(2,i/12);
+    g.gain.value=0.8;
+    o.connect(g); g.connect(octx.destination);
+    o.start(t); o.stop(t+0.3);
+   });
+  }
+ }
+ t+=0.25*(60/bpm.value)/speed.value;
+}
+octx.startRendering().then(b=>{
+ const wav=bufferToWav(b);
+ const a=document.createElement("a");
+ a.href=URL.createObjectURL(new Blob([wav]));
+ a.download="track.wav"; a.click();
+});
+}
+
+function bufferToWav(b){
+const l=b.length*2+44,v=new DataView(new ArrayBuffer(l));
+const d=b.getChannelData(0);
+function w(o,s){for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));}
+w(0,"RIFF");v.setUint32(4,36+d.length*2,true);w(8,"WAVE");
+w(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);
+v.setUint16(22,1,true);v.setUint32(24,44100,true);
+v.setUint32(28,88200,true);v.setUint16(32,2,true);v.setUint16(34,16,true);
+w(36,"data");v.setUint32(40,d.length*2,true);
+let o=44;
+for(let i=0;i<d.length;i++,o+=2){
+ let s=Math.max(-1,Math.min(1,d[i]));
+ v.setInt16(o,s*0x7fff,true);
+}
+return v.buffer;
+}
+</script>
+</body>
+  </html>
